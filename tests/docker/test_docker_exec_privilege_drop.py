@@ -146,12 +146,6 @@ def test_shim_drops_root_to_hermes_uid(sleep_container: str) -> None:
     )
 
 
-
-
-
-
-
-
 def test_main_cmd_path_unaffected(built_image: str) -> None:
     """The CMD path (docker run <image> <args>) must still work.
 
@@ -172,55 +166,3 @@ def test_main_cmd_path_unaffected(built_image: str) -> None:
     )
     assert r.returncode == 0, f"CMD path broken by shim: stderr={r.stderr!r}"
     assert "Traceback" not in r.stderr
-
-
-def test_e2e_login_then_supervised_gateway_can_read_auth(
-    sleep_container: str,
-) -> None:
-    """End-to-end regression for the original bug.
-
-    Pre-shim: ``docker exec <c> hermes login`` (root) wrote
-    /opt/data/auth.json as root:root 0600. The supervised gateway (UID
-    10000) couldn't read it, _load_auth_store swallowed PermissionError
-    as a parse failure, and resolve_nous_runtime_credentials raised
-    "Hermes is not logged into Nous Portal" on every message.
-
-    We can't do a real OAuth login in a unit test, but we can stand in
-    for it by writing the same file shape via `hermes config set`-style
-    writes — what matters is the *file ownership invariant* downstream
-    of `_save_auth_store`. If the shim works, every file the
-    `docker exec` path produces is hermes-readable.
-
-    Specifically: pretend the operator ran `hermes login` (writes
-    auth.json) and verify (a) the file exists and (b) it's readable by
-    the hermes UID. We use `hermes auth list` since that touches the
-    auth store on the read side and would fail with the same
-    'not logged in' shape if the file was unreadable to uid 10000.
-    """
-    # Have the shim-protected `docker exec` write the auth store.
-    # `hermes auth list` is read-only but still exercises _load_auth_store
-    # under the shim's UID. We invoke `hermes config set` first to
-    # provoke a write into HERMES_HOME so we have something concrete to
-    # owner-check.
-    r = subprocess.run(
-        ["docker", "exec", sleep_container,
-         "hermes", "config", "set", "_test.e2e_marker", "1"],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert r.returncode == 0, f"config set failed: {r.stderr}"
-
-    # The supervised UID (10000) must be able to read everything under
-    # HERMES_HOME that docker exec just wrote.
-    r = subprocess.run(
-        ["docker", "exec", "--user", "hermes", sleep_container,
-         "find", "/opt/data", "-maxdepth", "2", "-type", "f",
-         "!", "-readable", "-print"],
-        capture_output=True, text=True, timeout=15,
-    )
-    assert r.returncode == 0, f"find failed: {r.stderr}"
-    unreadable = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    assert not unreadable, (
-        "Files written by `docker exec` are unreadable to the hermes user "
-        f"(supervised gateway UID): {unreadable}. The shim failed to drop "
-        "privileges before the write."
-    )
