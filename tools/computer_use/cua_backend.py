@@ -150,6 +150,29 @@ def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str,
         env[_CUA_NATIVE_WAYLAND_ENV_VAR] = "1"
     return env
 
+def sandbox_mcp_invocation() -> Optional[Tuple[Tuple[str, List[str]], Dict[str, str]]]:
+    """``((command, args), child_env)`` spawning ``cua-driver mcp`` INSIDE the terminal backend when the Bot
+    Desktop is placed there (the driver in the sandbox image drives the sandbox's own screen); None on a
+    gateway-hosted desktop, where the local driver is used."""
+    from tools.bot_desktop import runtime as _bd_runtime
+    try:
+        if not _bd_runtime.in_sandbox():
+            return None
+    except Exception:  # noqa: BLE001 — an unreadable config means "not placed in a sandbox", never a spawn failure
+        return None
+    published = _bd_runtime.published_env()
+    if not published.get("DISPLAY"):
+        return None
+    from tools.bot_desktop import sandbox_host
+    env = _bd_runtime._sandbox_env(create=False)
+    if env is None:
+        return None
+    command, args = sandbox_host.cua_mcp_invocation(env, _bd_runtime._profile_name(),
+                                                    {**published, _CUA_TELEMETRY_ENV_VAR: "0"})
+    _bd_runtime.touch_activity()
+    return (command, args), {"PATH": os.environ.get("PATH", "")}
+
+
 def sanitized_cua_driver_env() -> Dict[str, str]:
     """``cua_driver_child_env()`` with Hermes provider secrets stripped — cua-driver is a third-party binary and must
     never inherit API keys. Falls back to the unsanitized telemetry env if the sanitizer can't import."""
@@ -256,12 +279,17 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         self._clear_active_target()
 
     def start(self) -> None:
-        # Runtime acquisition is on-demand, never the explicit install command
+        # Driver inside the terminal backend: the sandbox image pins its own cua-driver; the host
+        # binary (if any) is not the one that will run, so neither its acquisition nor its contract
+        # matters. On the host, runtime acquisition is on-demand, never the explicit install command
         # (which may elevate for host setup and bypass the lazy-install gate).
-        if not os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip():
-            from pm import ensure
-            ensure("cua-driver")
-        contract = cua_driver_runtime_contract_status()
+        if sandbox_mcp_invocation() is not None:
+            contract = {"ready": True}
+        else:
+            if not os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip():
+                from pm import ensure
+                ensure("cua-driver")
+            contract = cua_driver_runtime_contract_status()
         if not contract.get("ready"):
             raise RuntimeError(f"cua-driver is not ready: {contract.get('reason') or 'runtime contract is incomplete'}. "
                                + ("Update the binary selected by HERMES_CUA_DRIVER_CMD or remove that override."
@@ -408,7 +436,6 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
 # The whole block is removed by reverting the commit that added it.
 from pathlib import PureWindowsPath  # noqa: F401,E402
-from typing import Tuple  # noqa: F401,E402
 import asyncio  # noqa: F401,E402
 import base64  # noqa: F401,E402
 import concurrent.futures  # noqa: F401,E402
