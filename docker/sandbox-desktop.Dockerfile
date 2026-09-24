@@ -10,7 +10,7 @@
 # Published as nousresearch/hermes-sandbox:desktop by .github/workflows/docker.yml.
 # The tag lives in the ARG so CI and a local build read one place; hadolint cannot
 # see through the substitution, hence the inline ignore.
-ARG SANDBOX_BASE=nikolaik/python-nodejs:python3.11-nodejs20
+ARG SANDBOX_BASE=nikolaik/python-nodejs:python3.13-nodejs26
 # hadolint ignore=DL3006
 FROM ${SANDBOX_BASE}
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
