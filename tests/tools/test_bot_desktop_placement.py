@@ -79,3 +79,28 @@ def test_sandbox_rfb_and_cua_ride_the_exec_prefix(monkeypatch):
     assert command == "docker" and args[:5] == ["exec", "-i", "-u", "pn", "c0ffee"]
     assert "cua-driver mcp" in args[-1] and "export DISPLAY=:20" in args[-1]
     assert not isinstance(env, DockerEnvironment)  # the fake never touched a real daemon
+
+
+def test_sandbox_status_offers_the_image_switch_instead_of_a_config_hint(monkeypatch):
+    """A docker sandbox kept on the previous default image (no desktop stack) is the common
+    upgraded-install case: the blocker becomes the switch offer and ``image_switch`` carries what
+    the pane needs to approve it. Without a pending switch the plain image hint stands."""
+    from hermes_cli import sandbox_image_switch as sw
+    from tools.bot_desktop import sandbox_host
+
+    monkeypatch.setattr(placement, "_setting", lambda: "auto")
+    monkeypatch.setattr(placement, "_terminal_backend", lambda: "docker")
+    monkeypatch.setattr(placement, "terminal_environment", lambda *, create=True: _FakeDocker())
+    monkeypatch.setattr(sandbox_host, "missing_binaries", lambda env: ["Xvnc"])
+    monkeypatch.setattr(sandbox_host, "published_env", lambda env, profile: {})
+
+    monkeypatch.setattr(sw, "pending", lambda: sw.PendingSwitch("old/base:1", "nousresearch/hermes-sandbox:desktop", ["hermes-a"]))
+    st = runtime.status()
+    assert st.image_switch == {"current_image": "old/base:1", "target_image": "nousresearch/hermes-sandbox:desktop", "containers": 1}
+    assert "old/base:1" in st.blocker and "/root and /workspace" in st.blocker
+    assert st.installed and not st.running
+
+    monkeypatch.setattr(sw, "pending", lambda: None)
+    st = runtime.status()
+    assert st.image_switch is None
+    assert "Xvnc" in st.blocker and "placement: gateway" in st.blocker

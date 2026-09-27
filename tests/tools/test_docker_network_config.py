@@ -63,7 +63,8 @@ def test_every_sandbox_creator_passes_the_full_container_config(monkeypatch):
 
 
 def _reuse_guard_harness(
-    monkeypatch, *, existing_mode: str, network: bool, extra_args=None, existing_image: str = "python:3.11"
+    monkeypatch, *, existing_mode: str, network: bool, extra_args=None, existing_image: str = "python:3.11",
+    image_pinned: bool = False,
 ):
     """Drive DockerEnvironment through the cross-process reuse path with a
     fake existing container whose NetworkMode is *existing_mode*.
@@ -104,6 +105,7 @@ def _reuse_guard_harness(
         network=network,
         extra_args=extra_args,
         persist_across_processes=True,
+        image_pinned=image_pinned,
     )
     return commands
 
@@ -135,13 +137,28 @@ def test_reuse_skips_inspect_when_network_enabled(monkeypatch):
     assert not any(cmd[1] == "run" for cmd in commands)
 
 
-def test_reuse_recreates_container_built_from_another_image(monkeypatch):
-    """docker_image changed (a user edit or a default flip): the old container is not this
-    config's sandbox and must be replaced, or the new image never takes effect."""
-    commands = _reuse_guard_harness(monkeypatch, existing_mode="bridge", network=True, existing_image="old/image:1")
+def test_reuse_recreates_container_built_from_another_image_when_pinned(monkeypatch):
+    """The user changed docker_image (config.yaml / TERMINAL_DOCKER_IMAGE): the old container is not
+    their sandbox any more and must be replaced, or the new image never takes effect."""
+    commands = _reuse_guard_harness(monkeypatch, existing_mode="bridge", network=True,
+                                    existing_image="old/image:1", image_pinned=True)
 
     assert any(cmd[1:3] == ["rm", "-f"] for cmd in commands), "container from another image must be removed"
     assert any(len(cmd) > 2 and cmd[1:3] == ["run", "-d"] for cmd in commands)
+
+
+def test_reuse_keeps_container_built_from_another_image_when_default_flipped(monkeypatch, caplog):
+    """A DEFAULT flip (nikolaik base -> hermes-sandbox:desktop) must not replace a sandbox the user has
+    state in: the existing container is kept and the log names the approval command. Same rule Modal
+    (snapshot wins) and Daytona (labeled sandbox wins) already apply."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger=docker_env.logger.name):
+        commands = _reuse_guard_harness(monkeypatch, existing_mode="bridge", network=True,
+                                        existing_image="old/image:1", image_pinned=False)
+
+    assert not any(cmd[1:3] == ["rm", "-f"] for cmd in commands), "an unpinned default never removes a sandbox"
+    assert not any(len(cmd) > 2 and cmd[1:3] == ["run", "-d"] for cmd in commands), "existing container reused"
+    assert "hermes config set terminal.docker_image python:3.11" in caplog.text
 
 
 def test_extra_args_network_none_emits_flag_once(monkeypatch):
@@ -164,3 +181,23 @@ def test_contradictory_network_request_fails_closed(monkeypatch):
 
     with pytest.raises(RuntimeError, match="docker_network"):
         _reuse_guard_harness(monkeypatch, existing_mode="bridge", network=False, extra_args=["--network=host"])
+
+
+def test_pin_verdict_reaches_docker_environment_through_the_terminal_tool(monkeypatch):
+    """TERMINAL_DOCKER_IMAGE_PINNED must survive the terminal tool's config shaping
+    (``_CONTAINER_KEYS`` is an allowlist): a pinned image that the builder never sees is a pin
+    the runtime never honours, and the approval would silently do nothing."""
+    from tools import terminal_tool as tt
+    from tools.terminal_tool_backends import _build_docker_env, _container_config_from_config
+
+    seen = {}
+    monkeypatch.setattr("tools.terminal_tool_backends._DockerEnvironment",
+                        lambda **kw: seen.update(kw) or object())
+    monkeypatch.setattr(tt, "_maybe_reap_docker_orphans", lambda cc: None)
+    monkeypatch.setattr(tt, "_docker_session_isolation_enabled", lambda: False)
+    for pinned in ("1", "0"):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_DOCKER_IMAGE_PINNED", pinned)
+        cc = _container_config_from_config(tt._get_env_config())
+        _build_docker_env(image="x", cwd="/root", timeout=5, cc=cc, task_id="default", host_cwd=None)
+        assert seen["image_pinned"] is (pinned == "1")

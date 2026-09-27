@@ -168,6 +168,20 @@ def _(rid, params: dict) -> dict:
         return _err(rid, _DISPLAY_ERR, str(e))
 
 
+@method("display.switchSandboxImage")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    """The Screen pane's answer to the pending default-image switch: ``approve`` true pins the new
+    image (the container is recreated on the next terminal call), false pins the current one. Both
+    end the offer. Refused when nothing is pending, so a stale pane cannot rewrite the config."""
+    from hermes_cli.sandbox_image_switch import decide, pending
+    sw = pending()
+    if sw is None:
+        return _err(rid, _DISPLAY_ERR, "no sandbox image switch is pending for this profile")
+    image = decide(sw, approve=bool(params.get("approve", True)))
+    return _ok(rid, {"docker_image": image, **_display_snapshot()})
+
+
 @method("display.install")
 @_profile_scoped
 def _(rid, params: dict) -> dict:

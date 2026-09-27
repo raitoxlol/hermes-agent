@@ -146,6 +146,7 @@ class DesktopStatus:
     memory_available_mb: Optional[int] = None
     memory_limit_mb: Optional[int] = None
     placement: str = "gateway"  # "gateway" | "terminal:<backend>" — where Xvnc runs
+    image_switch: Optional[Dict[str, object]] = None  # pending default-image switch the pane can approve
 
     def as_dict(self) -> Dict[str, object]:
         return dict(self.__dict__)
@@ -547,10 +548,22 @@ def _sandbox_status(profile: Optional[str], where) -> DesktopStatus:
     # No install_command: the pane's Install button runs apt on the HOST, which is the wrong machine here.
     # A sandbox missing the stack is a blocker (shown in place of Start) naming the image that has it.
     blocker = None
+    image_switch = None
     if missing:
         blocker = (f"The terminal backend's sandbox image lacks {', '.join(missing)}. Use "
                    f"{sandbox_host.SANDBOX_IMAGE_HINT} as terminal.{where.backend}_image (the default sandbox base "
                    f"plus the desktop stack), or set bot_desktop.placement: gateway.")
+        if where.backend == "docker":
+            # The usual reason on an upgraded install: the persisted container predates the default
+            # flip and was kept on purpose. The pane offers the switch instead of a config hint.
+            from hermes_cli.sandbox_image_switch import pending
+            sw = pending()
+            if sw is not None:
+                image_switch = {"current_image": sw.current_image, "target_image": sw.target_image,
+                                "containers": len(sw.containers)}
+                blocker = (f"Your sandbox container still runs {sw.current_image}, which has no desktop. "
+                           f"Switch it to {sw.target_image}: files in /root and /workspace stay, packages "
+                           f"installed inside the container are reinstalled on demand.")
     return DesktopStatus(
         profile=profile or _profile_name(),
         supported=True,
@@ -567,6 +580,7 @@ def _sandbox_status(profile: Optional[str], where) -> DesktopStatus:
         memory_available_mb=None,
         memory_limit_mb=None,
         placement=f"{placement.TERMINAL}:{where.backend}",
+        image_switch=image_switch,
     )
 
 

@@ -249,10 +249,8 @@ Singularity): the `nikolaik/python-nodejs` base (Python 3.13 / Node 26) plus
 TigerVNC, the Xfce components, a headed Chromium, `agent-browser`, `cua-driver`
 and the everyday tools that base lacked (jq, ripgrep, fd, tmux, rsync, sudo for
 the image's `pn` user). Its default user is root, like the old default, so
-shell workflows do not change. Configs that still held the previous default
-(`nikolaik/python-nodejs:python3.11-nodejs20`) are moved to it on upgrade; an
-image you pinned yourself is left alone, and the screen then tells you it needs
-this image or `bot_desktop.placement: gateway`:
+shell workflows do not change. An image you pinned yourself is left alone, and
+the screen then tells you it needs this image or `bot_desktop.placement: gateway`:
 
 ```yaml
 terminal:
@@ -261,7 +259,26 @@ terminal:
 ```
 
 With a plain image the Screen pane reports the missing binaries and names
-this tag. Desktop processes run as the image's unprivileged `pn` (uid 1000);
+this tag.
+
+**Upgrading from the previous default.** A Docker sandbox you already have is
+kept, not replaced: when `docker_image` is unset and a persisted container runs
+another image (the old default, `nikolaik/python-nodejs:python3.11-nodejs20`),
+the terminal keeps using that container and you decide the switch. The
+interactive CLI asks once at startup; the Screen pane shows the same choice
+with **Switch image** / **Keep current image**; `hermes config set
+terminal.docker_image nousresearch/hermes-sandbox:desktop` is the same answer
+from any shell. Either answer writes `terminal.docker_image`, and a written
+image is a decision: the container is recreated on the next terminal call only
+when you chose the new image. What a switch means: files under `/root` and
+`/workspace` stay (they are host directories under `~/.hermes/sandboxes/`),
+packages installed inside the container with `apt`/`pip`/`npm -g` are
+reinstalled on demand, and Python 3.11 virtualenvs need a rebuild on 3.13.
+Gateways and cron never decide; they keep the sandbox and log the notice.
+Configs that literally held the old default were unset on upgrade (that value
+was the template copied, not a pin). Modal restores its snapshot and Daytona
+reuses its labeled sandbox regardless of the configured image, so an existing
+sandbox there is untouched and only a fresh one gets the new image. Desktop processes run as the image's unprivileged `pn` (uid 1000);
 Chromium gets `--no-sandbox` inside containers (Docker's seccomp profile
 denies the user namespaces its own sandbox needs; the container is the
 sandbox).

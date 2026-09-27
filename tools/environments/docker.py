@@ -597,7 +597,8 @@ class DockerEnvironment(BaseEnvironment):
         persist_across_processes: bool = True,
         shm_size: str = _DEFAULT_SHM_SIZE,
         shared_container_key: str = "",
-        snap_compat: bool = False):
+        snap_compat: bool = False,
+        image_pinned: bool = False):
         if cwd == "~":
             cwd = "/root"
         super().__init__(cwd=cwd, timeout=timeout)
@@ -678,6 +679,7 @@ class DockerEnvironment(BaseEnvironment):
             _EGRESS_LABEL_KEY: egress_label}
         # Saved for container recreation on "No such container" recovery.
         self._image = image
+        self._image_pinned = image_pinned
         self._image_uses_s6_init = image_uses_s6_init
         self._all_run_args = all_run_args
 
@@ -842,21 +844,31 @@ class DockerEnvironment(BaseEnvironment):
         if existing is None:
             return False
         container_id, state = existing
-        # A container built from another image is not this config's sandbox: the user (or a
-        # default flip) changed docker_image, and reusing the old one would silently pin the
-        # previous image forever (Bot Screen then reports a missing desktop stack the config
-        # says it has). Recreate; the image is immutable after creation.
+        # A container built from another image. Explicitly configured image (config.yaml /
+        # TERMINAL_DOCKER_IMAGE): the user changed it, so the old container is not their sandbox any
+        # more — recreate (the image is immutable after creation). Default image: a default flip
+        # (nikolaik base -> hermes-sandbox:desktop) must not replace a sandbox someone has state in;
+        # keep it and let the CLI / Screen pane ask. Same rule Modal (snapshot wins) and Daytona
+        # (labeled sandbox wins) already apply.
         actual_image = self._container_image(container_id)
         if actual_image is not None and actual_image != self._image:
-            logger.warning(
-                "Existing container %s runs image %s but docker_image is %s — removing it and "
-                "starting fresh (task=%s, profile=%s).",
-                container_id[:12], actual_image, self._image, task_label, profile_name)
-            try:
-                run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
-            except (subprocess.TimeoutExpired, OSError) as e:
-                logger.warning("Failed to remove mismatched container %s: %s", container_id[:12], e)
-            return False
+            if not self._image_pinned:
+                logger.warning(
+                    "Existing container %s runs image %s; the default docker_image is now %s. Keeping "
+                    "the existing sandbox — approve the switch with `hermes config set "
+                    "terminal.docker_image %s` (files in /root and /workspace carry over) or pin the "
+                    "current image to stop this notice (task=%s, profile=%s).",
+                    container_id[:12], actual_image, self._image, self._image, task_label, profile_name)
+            else:
+                logger.warning(
+                    "Existing container %s runs image %s but docker_image is %s — removing it and "
+                    "starting fresh (task=%s, profile=%s).",
+                    container_id[:12], actual_image, self._image, task_label, profile_name)
+                try:
+                    run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
+                except (subprocess.TimeoutExpired, OSError) as e:
+                    logger.warning("Failed to remove mismatched container %s: %s", container_id[:12], e)
+                return False
         if not network:
             actual_mode = self._container_network_mode(container_id)
             if actual_mode != "none":

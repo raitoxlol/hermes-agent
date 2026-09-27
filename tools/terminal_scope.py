@@ -121,6 +121,7 @@ def build_profile_terminal_scope(
                 scope[env_var] = _terminal_env_value(value)
 
     _apply({**_TOOL_LEVEL_DEFAULTS, **(DEFAULT_CONFIG.get("terminal") or {})})
+    default_image = scope.get("TERMINAL_DOCKER_IMAGE")
     env_path = home / ".env"
     if env_path.exists():
         # load_env_file swallows OSError by design (secret scope fails soft); an unreadable
@@ -134,7 +135,11 @@ def build_profile_terminal_scope(
         scope.update((k, str(v)) for k, v in load_env_file(env_path).items()
                      if k.startswith("TERMINAL_"))
     if env_overlay:
-        scope.update((k, str(v)) for k, v in env_overlay.items() if k.startswith("TERMINAL_"))
+        scope.update((k, str(v)) for k, v in env_overlay.items()
+                     if k.startswith("TERMINAL_") and k != "TERMINAL_DOCKER_IMAGE_PINNED")
+    # Same verdict as apply_terminal_config_to_env: pinned when the profile's .env / launch overlay
+    # / config.yaml chose the image, default otherwise (recomputed here, never inherited).
+    image_pinned = scope.get("TERMINAL_DOCKER_IMAGE") != default_image
     # Read config.yaml directly, not via read_raw_config() (which collapses "missing" and
     # "unparseable" into {}): present-but-unparseable must fail closed.
     config_path = home / "config.yaml"
@@ -153,6 +158,8 @@ def build_profile_terminal_scope(
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
             _apply(raw_terminal)
+            image_pinned = image_pinned or "docker_image" in raw_terminal
+    scope["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if image_pinned else "0"
     _resolve_scope_cwd_placeholder(scope)
     return scope
 
