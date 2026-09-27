@@ -312,6 +312,54 @@ class TestReclaim:
         archived = list((get_hermes_home() / "archive" / "worktree-prune").rglob("analysis.md"))
         assert [p.read_text() for p in archived] == ["two days of work\n"], "hermes worktree prune"
 
+    def test_ignored_env_is_preserved_while_disposable_ignored_output_is_not(self, repo):
+        """Plain porcelain never lists git-ignored paths, so a tree whose only content is an ignored
+        ``.env`` read as clean and every reclaimer force-removed it. Ignored user content must be
+        preserved like untracked work; ignored dependency/build/cache output (hermes' own ``.venv``
+        symlink, ``__pycache__``, ``node_modules``) must neither pin a tree nor be archived."""
+        from hermes_cli import worktree_ops
+        from hermes_constants import get_hermes_home
+        from tools.subagent_worktree import finalize_subagent_worktree
+        (repo / ".gitignore").write_text(".env\n.venv\n__pycache__/\nnode_modules/\n")
+        _git(["add", ".gitignore"], repo)
+        _git(["commit", "-m", "ignore"], repo)
+        _git(["push", "origin", "main"], repo)
+
+        def plant(tree, *, env):
+            os.symlink(repo / ".venv-main", tree / ".venv")
+            (tree / "agent" / "__pycache__").mkdir(parents=True)
+            (tree / "agent" / "__pycache__" / "a.pyc").write_bytes(b"\0")
+            (tree / "node_modules" / "left-pad").mkdir(parents=True)
+            (tree / "node_modules" / "left-pad" / "index.js").write_text("x\n")
+            if env:
+                (tree / ".env").write_text("SECRET=1\n")
+
+        trees = {}
+        for name in ("hermes-startup", "hermes-gc", "subagent-child", "hermes-disposable-only"):
+            trees[name] = _add_worktree(repo, name)
+            plant(trees[name][0], env=name != "hermes-disposable-only")
+        aged = time.time() - 7 * 86400
+        for name in ("hermes-startup", "hermes-disposable-only"):
+            os.utime(trees[name][0], (aged, aged))
+
+        worktree_ops._prune_stale_worktrees(str(repo))
+        assert (trees["hermes-startup"][0] / ".env").exists(), "startup pruner destroyed an ignored .env"
+        assert not trees["hermes-disposable-only"][0].exists(), "disposable ignored output pinned a clean tree"
+
+        child, branch = trees["subagent-child"]
+        result = finalize_subagent_worktree({"path": str(child), "branch": branch, "repo_root": str(repo),
+                                             "base_commit": _git(["rev-parse", "HEAD"], repo)})
+        assert result["dirty"] is True and result["pruned"] is False, "subagent finalizer"
+        assert (child / ".env").exists()
+
+        gc_record = _verdict(worktree_gc.audit_worktrees(str(repo), with_sizes=False), "hermes-gc")
+        assert gc_record.verdict == "reap-archive" and gc_record.untracked == [".env"]
+        worktree_gc.reclaim_worktrees(str(repo), records=[gc_record])
+        assert not trees["hermes-gc"][0].exists()
+        [archive] = (get_hermes_home() / "archive" / "worktree-prune").iterdir()
+        assert sorted(p.name for p in archive.rglob("*")) == [".env"]
+        assert (archive / ".env").read_text() == "SECRET=1\n"
+
 
 class TestBranchGC:
     def test_merged_branch_deleted_any_name(self, repo):

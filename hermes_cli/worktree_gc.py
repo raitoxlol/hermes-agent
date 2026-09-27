@@ -2,7 +2,8 @@
 
 The startup pruner (``cli._prune_stale_worktrees``) is conservative and silent — clean, fully
 merged scratch past an age tier only. This module also reclaims trees whose only "dirt" is
-untracked scratch (archived first) and branches whose content is on upstream.
+untracked or git-ignored scratch such as ``.env`` (archived first) and branches whose content is on
+upstream.
 """
 
 from __future__ import annotations
@@ -88,24 +89,21 @@ def _tree_size_mb(path: Path, timeout: int = 30) -> Optional[int]:
 
 
 def _dirty_split(path: str) -> tuple[bool, List[str]]:
-    """(has_tracked_modifications, untracked_paths) — tracked = real work, untracked = archivable."""
+    """(has_tracked_modifications, preservable_paths) — tracked = real work; untracked and
+    non-disposable ignored paths (``.env``) = archivable. See ``worktree_ops.split_worktree_content``."""
+    from hermes_cli.worktree_ops import WORKTREE_CONTENT_STATUS_ARGS, split_worktree_content
     try:
-        # -z: plain porcelain C-quotes names with spaces or non-ASCII, and the quoted form names no
-        # file on disk. --untracked-files=all: status.showUntrackedFiles=no must not hide work.
-        result = _git(["status", "--porcelain", "-z", "--untracked-files=all"], cwd=path, timeout=10)
+        result = _git(list(WORKTREE_CONTENT_STATUS_ARGS), cwd=path, timeout=10)
         if result.returncode != 0:
             return True, []  # fail safe: treat as real work
-        # A rename's source is its own NUL field; as a non-"??" record it only reinforces the
-        # tracked verdict the rename already carries.
-        records = [record for record in result.stdout.split("\0") if record]
-        untracked = [record[3:] for record in records if record.startswith("?? ")]
-        return len(untracked) != len(records), untracked
+        return split_worktree_content(result.stdout)
     except Exception:
         return True, []
 
 
 def _archive_untracked(tree: Path, untracked: List[str]) -> Optional[Path]:
-    """Copy untracked files out of a doomed tree; None on any failure (caller must then keep)."""
+    """Copy untracked and preserved ignored files out of a doomed tree; None on any failure (caller
+    must then keep)."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     from hermes_constants import get_hermes_home
     dest = get_hermes_home() / "archive" / "worktree-prune" / f"{tree.name}-{stamp}"
@@ -135,7 +133,7 @@ def _classify_tree(_ops, repo_root: str, entry: Path, merge_cache, remote_heads)
     tracked_dirty, untracked = _dirty_split(path)
     if tracked_dirty:
         return "keep", "uncommitted tracked changes (real work)", []
-    archive_note = f"{len(untracked)} untracked file(s) will be archived"
+    archive_note = f"{len(untracked)} untracked/ignored file(s) will be archived"
     if _ops._worktree_has_unpushed_commits(path, timeout=5) and not _ops._worktree_commits_all_merged_upstream(
         path, timeout=30, cache=merge_cache, max_ahead=_MAX_CHERRY_AHEAD):
         # Pushed-branch tier: single-branch fetch refspecs (managed-install default) leave pushed
@@ -296,9 +294,9 @@ def reclaim_worktrees(
         if record.untracked:
             archive = _archive_untracked(entry, record.untracked)
             if archive is None:
-                actions.append(f"kept {record.name} (archive of untracked files failed)")
+                actions.append(f"kept {record.name} (archive of untracked/ignored files failed)")
                 continue
-            actions.append(f"archived {len(record.untracked)} untracked file(s) → {archive}")
+            actions.append(f"archived {len(record.untracked)} untracked/ignored file(s) → {archive}")
 
         # Dead-pid locks must be unlocked or `remove --force` refuses.
         with contextlib.suppress(Exception):
