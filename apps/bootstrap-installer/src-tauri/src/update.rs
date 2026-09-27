@@ -523,18 +523,15 @@ struct StageRun<'a> {
     /// The Job Object containing the stage's whole tree, assigned while the
     /// leader was still suspended: every running stage is contained.
     #[cfg(windows)]
-    job: HANDLE,
+    job: OwnedJobHandle,
 }
 
 impl Drop for StageRun<'_> {
     fn drop(&mut self) {
-        // Closing the job handle releases the tree's members without killing
-        // them — a successful update hands descendants off to outlive us
-        // (deliberately no KILL_ON_JOB_CLOSE; see windows.ps1's HermesUpdateJob).
-        #[cfg(windows)]
-        unsafe {
-            CloseHandle(self.job)
-        };
+        // The job handle (`OwnedJobHandle`) closes itself here in field-drop
+        // order, which releases the tree's members without killing them — a
+        // successful update hands descendants off to outlive us (deliberately
+        // no KILL_ON_JOB_CLOSE; see windows.ps1's HermesUpdateJob).
         self.control.lock().running = false;
         self.control.idle.notify_all();
     }
@@ -572,7 +569,7 @@ impl StageRun<'_> {
         #[cfg(unix)]
         terminate_stage_tree(&mut self.child, self.pid, term_grace).await;
         #[cfg(windows)]
-        terminate_stage_tree(&mut self.child, self.job, self.pid, term_grace).await;
+        terminate_stage_tree(&mut self.child, &self.job, self.pid, term_grace).await;
         Err(anyhow!(STAGE_CANCELLED))
     }
 }
@@ -601,6 +598,31 @@ fn process_group_alive(pgid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// A Job Object handle with the sole owner's rights over the job. Win32
+/// kernel handles have no thread affinity, but the `windows-sys` alias is a
+/// bare `*mut c_void` (not `Send`), which would make `StageRun` — held across
+/// awaits by `run_cmd`/`pump` and the stage-tree tests — unusable from
+/// `tokio::spawn`. Storing the pointer as a plain integer restores `Send`;
+/// aliasing it back for the FFI calls is the documented HANDLE type pun.
+#[cfg(windows)]
+struct OwnedJobHandle(usize);
+
+#[cfg(windows)]
+impl OwnedJobHandle {
+    fn as_raw(&self) -> HANDLE {
+        self.0 as HANDLE
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedJobHandle {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is the sole owner; the handle was created by
+        // `assign_stage_job` and never duplicated elsewhere.
+        unsafe { CloseHandle(self.as_raw()) };
+    }
+}
+
 /// Put a freshly spawned — still suspended — stage leader into a new Job
 /// Object, then let it run. Windows has no process groups, so this job is the
 /// stage's tree boundary: `pump_child` may reap the leader while its
@@ -611,7 +633,7 @@ fn process_group_alive(pgid: u32) -> bool {
 /// A stage that cannot be contained is not allowed to run: stopping it
 /// later could never prove the tree gone (#75422).
 #[cfg(windows)]
-fn assign_stage_job(child: &mut tokio::process::Child) -> Result<HANDLE> {
+fn assign_stage_job(child: &mut tokio::process::Child) -> Result<OwnedJobHandle> {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
     };
@@ -650,7 +672,7 @@ fn assign_stage_job(child: &mut tokio::process::Child) -> Result<HANDLE> {
         unsafe { CloseHandle(job) };
         return Err(err);
     }
-    Ok(job)
+    Ok(OwnedJobHandle(job as usize))
 }
 
 /// Let a suspended stage leader run. The spawn used CREATE_SUSPENDED so the
@@ -723,7 +745,7 @@ fn resume_stage_process(child: &tokio::process::Child) -> Result<()> {
 #[cfg(windows)]
 async fn terminate_stage_tree(
     child: &mut tokio::process::Child,
-    job: HANDLE,
+    job: &OwnedJobHandle,
     _pid: u32,
     grace: Duration,
 ) {
@@ -734,7 +756,7 @@ async fn terminate_stage_tree(
 
     // SAFETY: the job handle is owned by the StageRun and closed only in its
     // Drop, which cannot run while this future holds the borrow.
-    unsafe { TerminateJobObject(job, 1) };
+    unsafe { TerminateJobObject(job.as_raw(), 1) };
     // The leader's own exit is not the tree's — reap it either way, bounded
     // by the grace; `start_kill` is only meaningful pre-reap and a no-op
     // after, which is fine: the job is the boundary, not the leader.
@@ -749,7 +771,7 @@ async fn terminate_stage_tree(
     loop {
         let ok = unsafe {
             QueryInformationJobObject(
-                job,
+                job.as_raw(),
                 JobObjectBasicAccountingInformation,
                 &mut info as *mut _ as *mut _,
                 std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
@@ -761,7 +783,7 @@ async fn terminate_stage_tree(
         }
         // A member added after the terminate (mid-CreateProcess race) gets
         // terminated on the next pass, like the unix arm's re-SIGKILL.
-        unsafe { TerminateJobObject(job, 1) };
+        unsafe { TerminateJobObject(job.as_raw(), 1) };
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
