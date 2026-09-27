@@ -6,10 +6,12 @@ docs of config.yaml.
 
 
 #: Image every container terminal backend (docker/modal/daytona/singularity) uses unless the
-#: user pins one. LEGACY_SANDBOX_IMAGE is what it was before the desktop stack; the config
-#: migration moves saved configs that still hold it, never a user's own pin.
+#: user pins one. LEGACY_SANDBOX_IMAGES are the plain defaults that preceded the desktop stack
+#: (the 3.14 pin shipped between the two without a migration); a saved config still holding one
+#: is the template copied, and the config migration unsets it, never a user's own pin.
 DEFAULT_SANDBOX_IMAGE = "nousresearch/hermes-sandbox:desktop"
-LEGACY_SANDBOX_IMAGE = "nikolaik/python-nodejs:python3.11-nodejs20"
+LEGACY_SANDBOX_IMAGES = ("nikolaik/python-nodejs:python3.11-nodejs20", "nikolaik/python-nodejs:python3.14-nodejs22")
+LEGACY_SANDBOX_IMAGE = LEGACY_SANDBOX_IMAGES[0]
 
 
 def _aux(timeout, *, reasoning_effort=True, **extra):
